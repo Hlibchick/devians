@@ -10,7 +10,7 @@ def main():
     for p in allowed:
         if p.suffix == '.py': ast.parse(p.read_text(encoding='utf-8'),filename=str(p))
     subprocess.run([sys.executable,'-m','pytest','-q'],cwd=ROOT,check=True)
-    destination=ROOT/'cyberlife_os_v2.zip'
+    destination=ROOT/'cyberlife_os_v2_0_1.zip'
     with zipfile.ZipFile(destination,'w',zipfile.ZIP_DEFLATED) as z:
         for p in allowed: z.write(p,Path('cyberlife_os')/p.relative_to(ROOT))
     print(destination)

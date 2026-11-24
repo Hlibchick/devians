@@ -1,6 +1,12 @@
 import io
 import threading
 
+class STTError(RuntimeError):
+    def __init__(self, stage, message, status_code=503):
+        super().__init__(message)
+        self.stage = stage
+        self.status_code = status_code
+
 class Listener:
     def __init__(self):
         self.model = None
@@ -16,25 +22,46 @@ class Listener:
             self.model = WhisperModel('base', device='cpu', compute_type='int8', cpu_threads=4)
 
     def transcribe(self, data):
-        # faster-whisper decode_audio uses PyAV, including WebM/Opus support.
-        from faster_whisper.audio import decode_audio
-        samples = decode_audio(io.BytesIO(data), sampling_rate=16000)
+        try:
+            from faster_whisper.audio import decode_audio
+        except (ImportError, OSError) as exc:
+            raise STTError('dependencies', 'STT dependencies unavailable. Run .venv\\Scripts\\python.exe -m pip install -r requirements-audio.txt') from exc
+        try:
+            samples = decode_audio(io.BytesIO(data), sampling_rate=16000)
+        except Exception as exc:
+            raise STTError('decode', 'Audio recording could not be decoded. Record again and wait before stopping.', 422) from exc
         if len(samples) > 16000 * 120:
-            raise ValueError('Audio duration exceeds 120 seconds')
+            raise STTError('duration', 'Audio duration exceeds 120 seconds.', 413)
+        if len(samples) < 512:
+            return {'text':'', 'language':None}
         return self.samples(samples)
 
     def samples(self, samples):
-        import torch
-        from silero_vad import get_speech_timestamps, collect_chunks
+        try:
+            import torch
+            from silero_vad import get_speech_timestamps, collect_chunks
+        except (ImportError, OSError) as exc:
+            raise STTError('dependencies', 'CPU audio dependencies unavailable; reinstall requirements-audio.txt.') from exc
         with self.lock:
-            self.load()
-            tensor = torch.from_numpy(samples)
-            timestamps = get_speech_timestamps(tensor, self.vad, sampling_rate=16000)
-            if not timestamps:
-                return {'text':'', 'language':None}
-            speech = collect_chunks(timestamps, tensor).numpy()
-            segments, info = self.model.transcribe(speech, language=None)
-            return {'text':' '.join(s.text for s in segments).strip(), 'language':info.language}
+            try:
+                self.load()
+            except Exception as exc:
+                raise STTError('model_load', 'Could not load VAD/Whisper models. Check the server traceback and model download access.') from exc
+            try:
+                tensor = torch.from_numpy(samples)
+                timestamps = get_speech_timestamps(tensor, self.vad, sampling_rate=16000)
+                if not timestamps:
+                    return {'text':'', 'language':None}
+                speech = collect_chunks(timestamps, tensor).numpy()
+            except Exception as exc:
+                raise STTError('vad', 'Speech detection failed. See the server traceback for the CPU VAD error.') from exc
+            try:
+                segments, info = self.model.transcribe(speech, language=None)
+                # Whisper runs lazily: iteration must be inside this try block.
+                text = ' '.join(s.text for s in segments).strip()
+                return {'text':text, 'language':info.language}
+            except Exception as exc:
+                raise STTError('whisper', 'Whisper recognition failed. See the server traceback for the CPU inference error.') from exc
 
     def server_microphone(self):
         import sounddevice as sd

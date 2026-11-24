@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 let ws, turnId = null, current = null, audio = null, muted = false, modelList = [];
 let audioQueue = [], playing = false, recorder = null, mediaStream = null, micContext = null;
-let meterFrame = null, recordTimer = null, sttController = null, captureVersion = 0;
+let meterFrame = null, recordTimer = null, sttController = null, captureVersion = 0, micPending = false;
 function notice(text) { $('notice').textContent = text; }
 function send(value) {
   if (!ws || ws.readyState !== WebSocket.OPEN) { notice('Нет соединения'); return false; }
@@ -109,16 +109,24 @@ async function cleanupMic() {
 }
 async function toggleMic() {
   if(recorder && recorder.state==='recording') { recorder.stop(); return; }
+  if(micPending) return;
+  micPending=true;
   stopTurn(); const version=captureVersion;
   try {
     if(!navigator.mediaDevices || !window.MediaRecorder) throw Error('Нужен HTTPS/localhost и разрешение микрофона. Доступен текст или опциональный микрофон сервера.');
     mediaStream=await navigator.mediaDevices.getUserMedia({audio:true});
-    if(version!==captureVersion) { await cleanupMic(); return; }
-    const chunks=[]; recorder=new MediaRecorder(mediaStream);
+    if(version!==captureVersion) { await cleanupMic(); micPending=false; return; }
+    const chunks=[];
+    const mime=['audio/webm;codecs=opus','audio/ogg;codecs=opus','audio/mp4'].find(t=>MediaRecorder.isTypeSupported(t));
+    const recording=new MediaRecorder(mediaStream,mime ? {mimeType:mime} : {});
+    recorder=recording;
+    const recordStarted=performance.now();
     recorder.ondataavailable=e=>{if(e.data.size) chunks.push(e.data);};
     recorder.onstop=async()=>{
-      const type=recorder.mimeType; await cleanupMic();
+      const type=recording.mimeType; const duration=performance.now()-recordStarted;
+      await cleanupMic(); micPending=false;
       if(version!==captureVersion) return;
+      if(!chunks.length || duration<300) { notice('Запись слишком короткая. Нажмите запись, произнесите фразу и нажмите ещё раз.'); return; }
       const controller=new AbortController(); sttController=controller;
       try {
         notice('Распознавание…');
@@ -128,12 +136,13 @@ async function toggleMic() {
         sttController=null; if(d.text) startTurn(d.text); else notice('Речь не обнаружена');
       } catch(e) { if(e.name!=='AbortError') notice(e.message); }
     };
+    recorder.onerror=async()=>{captureVersion++;await cleanupMic();micPending=false;notice('Ошибка записи микрофона. Проверьте разрешение браузера.');};
     recorder.start(250); $('mic').textContent='■ Завершить запись'; $('mic').setAttribute('aria-pressed','true');
     micContext=new AudioContext(); const analyser=micContext.createAnalyser(); analyser.fftSize=256;
     micContext.createMediaStreamSource(mediaStream).connect(analyser); const samples=new Uint8Array(analyser.fftSize);
     const meter=()=>{analyser.getByteTimeDomainData(samples); $('level').value=Math.min(1,Math.sqrt(samples.reduce((s,x)=>s+((x-128)/128)**2,0)/samples.length)*5); meterFrame=requestAnimationFrame(meter);}; meter();
     recordTimer=setTimeout(()=>{if(recorder.state==='recording') recorder.stop();},120000);
-  } catch(e) { await cleanupMic(); notice(e.message); }
+  } catch(e) { await cleanupMic(); micPending=false; notice(e.message); }
 }
 $('form').onsubmit=e=>{e.preventDefault(); const text=$('input').value.trim(); if(text) {startTurn(text);$('input').value='';}};
 $('stop').onclick=()=>{stopTurn(); if(recorder?.state==='recording') recorder.stop();};

@@ -15,7 +15,7 @@ from app.db.vector_store import Memory
 from app.core.llm_router import Router
 from app.core.graph import create_graph
 from app.io.audio_out import Speaker
-from app.io.audio_in import Listener
+from app.io.audio_in import Listener, STTError
 from app.io.vision import capture
 
 log = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ def create_app(settings=None, router=None):
             try:
                 await asyncio.to_thread(app.state.listener.load)
             except Exception:
-                log.warning('STT preload unavailable; text mode remains active')
+                log.exception('STT preload unavailable; text mode remains active')
         async def consolidate():
             async with app.state.memory_lock:
                 await app.state.memory.consolidate()
@@ -114,8 +114,12 @@ def create_app(settings=None, router=None):
             raise HTTPException(400, 'Empty audio')
         try:
             return await asyncio.to_thread(app.state.listener.transcribe, bytes(audio))
+        except STTError as exc:
+            log.exception('STT failed: stage=%s bytes=%d content_type=%s', exc.stage, len(audio), request.headers.get('content-type', '')[:100])
+            raise HTTPException(exc.status_code, f'STT [{exc.stage}]: {exc}') from None
         except Exception:
-            raise HTTPException(422, 'STT unavailable or invalid audio; use text mode') from None
+            log.exception('STT failed: unexpected error, bytes=%d', len(audio))
+            raise HTTPException(500, 'STT [unexpected]: see the server traceback; text mode remains available.') from None
 
     @app.websocket('/ws')
     async def websocket(ws: WebSocket):
