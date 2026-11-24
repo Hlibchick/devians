@@ -4,7 +4,7 @@ class Settings(BaseSettings):
     primary_api_base_url: str = ""
     primary_api_key: str = ""
     primary_model: str = ""
-    vision_model: str = ""
+    vision_model: str = "moondream"
     ollama_base_url: str = "http://127.0.0.1:11434"
     local_fallback_model: str = "qwen2.5:3b"
     embedding_model: str = "nomic-embed-text"

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import httpx
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
@@ -55,8 +56,9 @@ def create_app(settings=None, router=None):
             except Exception:
                 log.exception('STT preload unavailable; text mode remains active')
         async def consolidate():
-            async with app.state.memory_lock:
-                await app.state.memory.consolidate()
+            async with app.state.lock:
+                async with app.state.memory_lock:
+                    await app.state.memory.consolidate()
         scheduler = AsyncIOScheduler()
         scheduler.add_job(consolidate, 'interval', minutes=5, max_instances=1)
         scheduler.start()
@@ -83,8 +85,9 @@ def create_app(settings=None, router=None):
         with app.state.db.connection() as connection:
             count = connection.execute("SELECT COUNT(*) FROM logs WHERE kind='chat'").fetchone()[0]
         if count >= 10:
-            async with app.state.memory_lock:
-                await app.state.memory.consolidate()
+            async with app.state.lock:
+                async with app.state.memory_lock:
+                    await app.state.memory.consolidate()
 
     @app.get('/api/health')
     async def health():
@@ -96,7 +99,7 @@ def create_app(settings=None, router=None):
 
     @app.get('/api/models')
     async def models():
-        return {'models':await app.state.router.models(), 'active':{'provider':app.state.router.provider, 'model':app.state.router.model}}
+        return {'models':await app.state.router.models(), 'preferred_model':settings.local_fallback_model, 'active':{'provider':app.state.router.provider, 'model':app.state.router.model if app.state.router.provider == 'local' else settings.primary_model}}
 
     @app.post('/api/stt')
     async def stt(request: Request):
@@ -141,11 +144,17 @@ def create_app(settings=None, router=None):
         async def turn(event, turn_id, selected_engine):
             started = time.perf_counter()
             ttft = None
+            model_ttft = None
             queue = asyncio.Queue()
             worker = None
             async def emit(payload):
-                nonlocal ttft
+                nonlocal ttft, model_ttft
                 payload['turn_id'] = turn_id
+                if payload['type'] == 'model_token':
+                    if model_ttft is None:
+                        model_ttft = (time.perf_counter()-started)*1000
+                        await send({'type':'model_timing','turn_id':turn_id,'model_ttft_ms':round(model_ttft,1)})
+                    return
                 if payload['type'] == 'token' and ttft is None:
                     ttft = (time.perf_counter() - started) * 1000
                     payload['ttft_ms'] = round(ttft, 1)
@@ -166,15 +175,20 @@ def create_app(settings=None, router=None):
                             raise ValueError('Vision disabled')
                         frame = await asyncio.to_thread(capture)
                         result = await app.state.router.complete([{'role':'user','content':[{'type':'text','text':'Describe this image.'},{'type':'image_url','image_url':{'url':'data:image/jpeg;base64,'+frame}}]}], vision=True)
-                        text = result.get('content') or 'Vision unavailable / Анализ изображения недоступен.'
+                        text = '[VISUAL INPUT]: ' + (result.get('content') or 'Vision unavailable / Анализ изображения недоступен.')
                     elif kind != 'text':
                         raise ValueError('Unknown event')
                     if not isinstance(text, str) or not text.strip() or len(text) > 16000:
                         raise ValueError('Input must contain 1–16000 characters')
+                    if hasattr(app.state.router, 'ensure_gpu'):
+                        try:
+                            await app.state.router.ensure_gpu(app.state.router.model)
+                        except httpx.HTTPError:
+                            pass  # Router retains diagnostic/API fallback when Ollama is offline.
                     worker = asyncio.create_task(app.state.speaker.run(queue, emit, turn_id, selected_engine))
                     graph = create_graph(app.state.db, app.state.router, app.state.memory, app.state.speaker, emit, session_id=session_id, speech_queue=queue)
                     result = await graph.ainvoke({'text':text, 'kind':kind})
-                    await emit({'type':'done', 'provider':app.state.router.status, 'ttft_ms':round(ttft,1) if ttft is not None else None, 'total_ms':round((time.perf_counter()-started)*1000,1)})
+                    await emit({'type':'done', 'provider':app.state.router.status, 'ttft_ms':round(ttft,1) if ttft is not None else None, 'model_ttft_ms':round(model_ttft,1) if model_ttft is not None else None, 'total_ms':round((time.perf_counter()-started)*1000,1)})
                     # Scheduling happens after completion delivery. No embedding work blocks done.
                     spawn(persist(result))
                     queue.put_nowait(None)

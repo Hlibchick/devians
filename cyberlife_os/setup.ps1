@@ -26,6 +26,7 @@ $env:OLLAMA_CONTEXT_LENGTH = "4096"
 [Environment]::SetEnvironmentVariable("OLLAMA_CONTEXT_LENGTH", "4096", "User")
 ollama pull nomic-embed-text; CheckExit
 ollama pull qwen2.5:3b; CheckExit
+ollama pull moondream; CheckExit
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 & .\.venv\Scripts\python.exe -m app.db.database; CheckExit
 Write-Host "Setup complete. Configure .env, then run run.ps1. Restart Ollama with two-model settings (restart the Ollama tray application); see README."

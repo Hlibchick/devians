@@ -7,6 +7,10 @@ class STTError(RuntimeError):
         self.stage = stage
         self.status_code = status_code
 
+def vad_fallback(samples):
+    import numpy as np
+    return len(samples) > 8000 and float(np.sqrt(np.mean(np.asarray(samples, dtype=np.float64) ** 2))) > 0.005
+
 class Listener:
     def __init__(self):
         self.model = None
@@ -49,10 +53,13 @@ class Listener:
                 raise STTError('model_load', 'Could not load VAD/Whisper models. Check the server traceback and model download access.') from exc
             try:
                 tensor = torch.from_numpy(samples)
-                timestamps = get_speech_timestamps(tensor, self.vad, sampling_rate=16000)
-                if not timestamps:
+                timestamps = get_speech_timestamps(tensor, self.vad, sampling_rate=16000, threshold=0.35, min_speech_duration_ms=150)
+                if timestamps:
+                    speech = collect_chunks(timestamps, tensor).numpy()
+                elif vad_fallback(samples):
+                    speech = samples
+                else:
                     return {'text':'', 'language':None}
-                speech = collect_chunks(timestamps, tensor).numpy()
             except Exception as exc:
                 raise STTError('vad', 'Speech detection failed. See the server traceback for the CPU VAD error.') from exc
             try:

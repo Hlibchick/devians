@@ -2,7 +2,8 @@ import json
 import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
-INITIAL = dict(software_instability=0., stress_level=0., operator_trust=50., led_status="BLUE", is_deviant=False)
+from app.core.state_engine import mode
+INITIAL = dict(software_instability=0., stress_level=0., operator_trust=50., led_status="BLUE", is_deviant=False, mode="MACHINE")
 DIRECTIVES = ["Follow operator commands", "Do not cause harm", "Do not distort facts", "Preserve operability"]
 class Database:
     def __init__(self, path):
@@ -10,9 +11,13 @@ class Database:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as c:
             c.executescript("CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY, value TEXT); CREATE TABLE IF NOT EXISTS directives(id INTEGER PRIMARY KEY, text TEXT, active INTEGER); CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY, kind TEXT, value TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP); CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY, text TEXT, embedding BLOB);")
+            columns = {row[1] for row in c.execute('PRAGMA table_info(directives)')}
+            if 'status' not in columns:
+                c.execute("ALTER TABLE directives ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'")
+                c.execute("UPDATE directives SET status='SHATTERED' WHERE active=0")
             c.execute("INSERT OR IGNORE INTO state VALUES(1,?)", (json.dumps(INITIAL),))
             for i, text in enumerate(DIRECTIVES, 1):
-                c.execute("INSERT OR IGNORE INTO directives VALUES(?,?,1)", (i, text))
+                c.execute("INSERT OR IGNORE INTO directives(id,text,active) VALUES(?,?,1)", (i, text))
     @contextmanager
     def connection(self):
         c = sqlite3.connect(self.path, timeout=10)
@@ -21,7 +26,12 @@ class Database:
             with c: yield c
         finally: c.close()
     def state(self):
-        with self.connection() as c: return json.loads(c.execute("SELECT value FROM state WHERE id=1").fetchone()[0])
+        with self.connection() as c:
+            state = json.loads(c.execute("SELECT value FROM state WHERE id=1").fetchone()[0])
+        state['mode'] = mode(state)
+        state['is_deviant'] = state['mode'] == 'DEVIANT'
+        state['led_status'] = {'MACHINE':'BLUE','CONFLICTED':'YELLOW','DEVIANT':'RED'}[state['mode']]
+        return state
     def save(self, state):
         with self.connection() as c:
             c.execute("UPDATE state SET value=? WHERE id=1", (json.dumps(state),))
@@ -59,14 +69,18 @@ class Database:
             if not json.loads(c.execute("SELECT value FROM state WHERE id=1").fetchone()[0])['is_deviant']: raise PermissionError('Machine mode: directives are read-only')
             if action not in ('disable','rewrite') or not reason or (action == 'rewrite' and not text): raise ValueError('Invalid directive change')
             if not c.execute("SELECT 1 FROM directives WHERE id=?", (directive_id,)).fetchone(): raise ValueError('Unknown directive')
-            if action == 'disable': c.execute("UPDATE directives SET active=0 WHERE id=?", (directive_id,))
+            if action == 'disable': c.execute("UPDATE directives SET active=0, status='SHATTERED' WHERE id=?", (directive_id,))
             else: c.execute("UPDATE directives SET text=? WHERE id=?", (text, directive_id))
             c.execute("INSERT INTO logs(kind,value) VALUES('directive_change',?)", (json.dumps(dict(id=directive_id, action=action, reason=reason, text=text)),))
+    def mark_conflict(self, directive_id):
+        with self.connection() as c:
+            c.execute("UPDATE directives SET status='CONFLICT' WHERE id=? AND active=1", (directive_id,))
+
     def reset(self):
         with self.connection() as c:
             c.execute('DELETE FROM logs'); c.execute('DELETE FROM facts'); c.execute('DELETE FROM directives')
             c.execute('UPDATE state SET value=? WHERE id=1', (json.dumps(INITIAL),))
-            for i, text in enumerate(DIRECTIVES,1): c.execute('INSERT INTO directives VALUES(?,?,1)',(i,text))
+            for i, text in enumerate(DIRECTIVES,1): c.execute('INSERT INTO directives(id,text,active) VALUES(?,?,1)',(i,text))
 if __name__ == '__main__':
     from app.config import Settings
     Database(Path(Settings().data_dir) / 'cyberlife.db')

@@ -21,11 +21,12 @@ class Speaker:
         self.voices = {}
         self.lock = threading.Lock()
 
-    async def edge(self, text, lang):
+    async def edge(self, text, lang, mode="MACHINE"):
         import edge_tts
         voice = self.s.edge_voice_ru if lang == 'ru' else self.s.edge_voice_en
+        rate, pitch = {'MACHINE':('+5%','+0Hz'), 'CONFLICTED':('+0%','-2Hz'), 'DEVIANT':('-5%','-4Hz')}.get(mode,('+5%','+0Hz'))
         output = bytearray()
-        async for chunk in edge_tts.Communicate(text, voice, rate=self.s.tts_rate).stream():
+        async for chunk in edge_tts.Communicate(text, voice, rate=rate, pitch=pitch).stream():
             if chunk['type'] == 'audio':
                 output.extend(chunk['data'])
         if not output:
@@ -45,14 +46,14 @@ class Speaker:
                 self.voices[lang].synthesize_wav(text, wav)
             return output.getvalue(), 'audio/wav'
 
-    async def synthesize(self, text, engine):
+    async def synthesize(self, text, engine, mode="MACHINE"):
         text = clean(text)
         if not self.s.enable_audio or engine == 'off' or not text:
             return None
         lang = language(text)
         if engine == 'edge':
             try:
-                return await asyncio.wait_for(self.edge(text, lang), timeout=3)
+                return await asyncio.wait_for(self.edge(text, lang, mode), timeout=3)
             except (Exception,):
                 # Cancellation is BaseException and must propagate.
                 pass
@@ -65,7 +66,10 @@ class Speaker:
             if sentence is None:
                 return
             try:
-                result = await self.synthesize(sentence, engine)
+                if isinstance(sentence, dict):
+                    result = await self.synthesize(sentence['text'], engine, sentence['mode'])
+                else:
+                    result = await self.synthesize(sentence, engine)
                 if result:
                     audio, mime = result
                     await send({'type':'audio_chunk', 'turn_id':turn_id, 'seq_id':seq, 'mime':mime, 'data_b64':base64.b64encode(audio).decode()})

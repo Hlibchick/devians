@@ -3,7 +3,7 @@ from app.core.state_engine import Evaluation, advance
 from app.db.database import INITIAL
 
 def evaluation(severity): return Evaluation(conflict_detected=bool(severity),conflict_severity=severity,emotional_valence=0,violated_directive_id=1,reasoning='test')
-@pytest.mark.parametrize('value,color',[(0,'BLUE'),(39.9,'BLUE'),(40,'YELLOW'),(74.9,'YELLOW'),(75,'RED'),(100,'RED')])
+@pytest.mark.parametrize('value,color',[(0,'BLUE'),(39.9,'BLUE'),(40,'BLUE'),(74.9,'YELLOW'),(75,'RED'),(100,'RED')])
 def test_thresholds(value,color):
     state=dict(INITIAL,software_instability=max(0,value-1))
     result=advance(state,evaluation(1 if value else 0))

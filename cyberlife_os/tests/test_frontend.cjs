@@ -21,3 +21,13 @@ assert.equal(players.length,2,'Old turn audio is ignored');
 vm.runInContext("$('mute').onclick(); ws.onmessage({data:JSON.stringify({type:'audio_chunk',turn_id:'next',mime:'audio/wav',data_b64:'AA=='})})",context);
 assert.equal(players.length,2,'Mute suppresses playback');
 console.log('Frontend: ordered audio, barge-in, stale turn rejection, mute passed');
+// Default selection follows backend configuration, never the first heavy model.
+(async()=>{
+  context.fetch=async()=>({ok:true,json:async()=>({models:[{id:'heavy:7b',provider:'local',vram_warning:true},{id:'qwen2.5:3b',provider:'local'}],preferred_model:'qwen2.5:3b',active:{provider:'local',model:'qwen2.5:3b'}})});
+  await vm.runInContext('loadModels()',context);
+  assert.equal(elements.get('model').value,'qwen2.5:3b');
+  assert.equal(elements.get('model').children[0].textContent,'heavy:7b [VRAM > 4GB]');
+  vm.runInContext("ws.onmessage({data:JSON.stringify({type:'thought',turn_id:'next',text:'fictional tactic'})})",context);
+  assert.equal(elements.get('thought').textContent,'fictional tactic');
+  console.log('Frontend v3: configured default, VRAM warning and PRECONSTRUCT passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});

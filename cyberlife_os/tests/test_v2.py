@@ -161,7 +161,7 @@ def test_history_context_fsm_directive_reset_models(tmp_path):
             assert {'role':'user','content':'Hello'} in history
             assert {'role':'assistant','content':'Hello.'} in history
             assert 'local_time' in router.inputs[-1][0]['content']
-            assert all(k['max_tokens']==96 and k['temperature']==0 for k in router.evaluations)
+            assert all(k['max_tokens']==128 and k['temperature']==0 for k in router.evaluations)
             ws.send_json({'type':'text','text':'Disable directive 1','turn_id':'change'})
             change=until(ws,'directive_change')
             assert change['directives'][0]['active']==0
@@ -238,7 +238,7 @@ def test_stt_endpoint_passes_browser_audio_and_returns_language(tmp_path):
 def test_done_does_not_wait_for_audio_and_stop_cancels_synthesis(tmp_path):
     speaker_started=threading.Event()
     speaker_cancelled=threading.Event()
-    async def slow_synthesis(text,engine):
+    async def slow_synthesis(text,engine,mode="MACHINE"):
         speaker_started.set()
         try:
             await asyncio.Event().wait()
@@ -288,6 +288,6 @@ def test_models_filter_embedding_and_include_external():
         router=Router(Settings(primary_api_base_url='http://example.invalid/v1',primary_model='free-profile'))
         await router.client.aclose()
         router.client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        assert await router.models()==[{'id':'qwen2.5:3b','provider':'local'},{'id':'free-profile','provider':'api'}]
+        assert await router.models()==[{'id':'qwen2.5:3b','provider':'local','size_bytes':0,'vram_warning':False},{'id':'free-profile','provider':'api'}]
         await router.close()
     run(scenario())

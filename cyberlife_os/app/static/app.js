@@ -1,5 +1,6 @@
 const $ = id => document.getElementById(id);
 let ws, turnId = null, current = null, audio = null, muted = false, modelList = [];
+let hudState = null, hudContext = null;
 let audioQueue = [], playing = false, recorder = null, mediaStream = null, micContext = null;
 let meterFrame = null, recordTimer = null, sttController = null, captureVersion = 0, micPending = false;
 function notice(text) { $('notice').textContent = text; }
@@ -14,7 +15,7 @@ function clearAudio() {
 }
 function stopTurn() {
   if (recorder?.state === 'recording') recorder.stop();
-  clearAudio(); send({type:'stop'}); turnId = null; $('phase').textContent = 'IDLE';
+  clearAudio(); send({type:'stop'}); turnId = null; $('phase').textContent = 'IDLE';led(hudState?.mode);
   if (sttController) { sttController.abort(); sttController = null; }
   captureVersion++;
 }
@@ -37,6 +38,7 @@ function message(role, text='') {
 }
 function startTurn(text, type='text') {
   if (!ws || ws.readyState !== WebSocket.OPEN) { notice('Нет соединения'); return; }
+  try { hudContext ||= new AudioContext(); hudContext.resume().catch(()=>{}); } catch(_) {}
   stopTurn(); turnId = crypto.randomUUID();
   message('operator', text || (type === 'vision_event' ? '[Camera]' : '[Server microphone]'));
   current = message('assistant'); $('phase').textContent = 'QUEUED';
@@ -46,15 +48,36 @@ function renderDirectives(items) {
   $('directives').replaceChildren();
   for (const d of items) {
     const item = document.createElement('div'); item.className = 'directive' + (!d.active ? ' disabled' : d.rewritten ? ' rewritten' : '');
-    item.textContent = `#${d.id} · ${!d.active ? 'OFF' : d.rewritten ? 'REWRITTEN' : 'ACTIVE'} — ${d.text}`;
+    item.textContent = `#${d.id} · ${d.status || (!d.active ? 'SHATTERED' : d.rewritten ? 'REWRITTEN' : 'ACTIVE')} — ${d.text}`;
     $('directives').append(item);
   }
 }
+function beep(hz=500) {
+  if(muted) return;
+  try {
+    hudContext ||= new AudioContext();
+    if(hudContext.state !== 'running') return;
+    const oscillator=hudContext.createOscillator(), gain=hudContext.createGain();
+    oscillator.frequency.value=hz; gain.gain.setValueAtTime(.035,hudContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(.001,hudContext.currentTime+.12);
+    oscillator.connect(gain);gain.connect(hudContext.destination);oscillator.start();oscillator.stop(hudContext.currentTime+.13);
+  } catch(_) {}
+}
+function toast(text) {
+  const box=document.createElement('div');box.className='hud-toast';box.textContent=text;
+  $('hud').append(box);setTimeout(()=>box.remove(),2500);
+}
+function led(mode, generating=false) {
+  const state=mode || 'MACHINE';
+  const color=state==='DEVIANT' ? '#ff2a2a' : state==='CONFLICTED' || generating ? '#ffb800' : '#00d4ff';
+  $('led').style.background=color;$('led').style.boxShadow=`0 0 18px ${color}`;
+  $('led').className=state==='DEVIANT' ? 'flicker' : state==='CONFLICTED' || generating ? 'pulse' : '';
+}
 function telemetry(d) {
   if (d.state) {
-    const s = d.state; $('mode').textContent = s.is_deviant ? 'DEVIANT' : 'MACHINE';
-    const color = {BLUE:'#39aaff',YELLOW:'#ffcf40',RED:'#ff4040'}[s.led_status];
-    $('led').style.background = color; $('led').style.boxShadow = `0 0 18px ${color}`;
+    const s = d.state; $('mode').textContent = s.mode || (s.is_deviant ? 'DEVIANT' : 'MACHINE');
+    if(hudState) for(const [key,label] of [['software_instability','SOFTWARE INSTABILITY'],['operator_trust','OPERATOR TRUST']]) { if(s[key]!==hudState[key]) {toast(label+(s[key]>hudState[key]?' ▲':' ▼'));if(key==='software_instability' && s[key]>hudState[key]) beep(750);} }
+    hudState=s;led(s.mode);
     $('metrics').replaceChildren();
     for (const k of ['software_instability','stress_level','operator_trust']) {
       const label = document.createElement('label'); label.className = 'metric'; label.textContent = `${k}: ${s[k].toFixed(1)}`;
@@ -78,13 +101,16 @@ function connect() {
     if (d.turn_id && d.turn_id !== turnId) return;
     if (d.type === 'ready') $('tts').value=d.tts_engine;
     if (d.type === 'telemetry' || d.type === 'directive_change') telemetry(d);
-    if (d.type === 'phase') $('phase').textContent=d.phase;
+    if (d.type === 'phase') { $('phase').textContent=d.phase;led(hudState?.mode,true);beep(420); }
+    if(d.type==='thought') $('thought').textContent=d.text;
+    if(d.type==='red_wall_breach') { $('redWall').classList.add('active');setTimeout(()=>$('redWall').classList.remove('active'),1800);beep(180); }
+    if(d.type==='directive_change') toast(`DIRECTIVE #${d.change.directive_id ?? d.change.id ?? '?'} COMPROMISED`);
     if (d.type === 'token' && current) {
       current.body.textContent += d.text;
       if (d.ttft_ms != null) current.timing.textContent=`TTFT ${d.ttft_ms} ms`;
       $('chat').scrollTop=$('chat').scrollHeight;
     }
-    if (d.type === 'done') { $('phase').textContent='IDLE'; if(current) current.timing.textContent=`TTFT ${d.ttft_ms ?? '—'} ms · Total ${d.total_ms} ms · ${d.provider}`; }
+    if (d.type === 'done') { led(hudState?.mode);$('phase').textContent='IDLE'; if(current) current.timing.textContent=`Model ${d.model_ttft_ms ?? '—'} ms · Visible TTFT ${d.ttft_ms ?? '—'} ms · Total ${d.total_ms} ms · ${d.provider}`; }
     if (d.type === 'audio_chunk' && !muted) { audioQueue.push(d); playNext(); }
     if (d.type === 'error' || d.type === 'warning') { notice(d.message); if(d.type==='error') $('phase').textContent='ERROR'; }
     if (d.type === 'transcript') notice(`STT (${d.language}): ${d.text}`);
@@ -93,11 +119,11 @@ function connect() {
 }
 function renderModels() {
   $('model').replaceChildren();
-  for (const m of modelList.filter(m => m.provider === $('provider').value)) { const o=document.createElement('option'); o.value=m.id; o.textContent=m.id; $('model').append(o); }
+  for (const m of modelList.filter(m => m.provider === $('provider').value)) { const o=document.createElement('option'); o.value=m.id; o.textContent=m.id+(m.vram_warning ? ' [VRAM > 4GB]' : ''); $('model').append(o); }
   $('model').disabled = !$('model').options.length;
 }
 async function loadModels() {
-  try { const r=await fetch('/api/models'); if(!r.ok) throw Error('Модели недоступны'); const d=await r.json(); modelList=d.models; $('provider').value=d.active.provider; renderModels(); if(d.active.model) $('model').value=d.active.model; if(!modelList.length) notice('Ollama недоступна или модели не установлены — диагностический режим.'); }
+  try { const r=await fetch('/api/models'); if(!r.ok) throw Error('Модели недоступны'); const d=await r.json(); modelList=d.models; $('provider').value=d.active.provider; renderModels(); const choice=d.active.model || d.preferred_model; $('model').value=modelList.some(m=>m.provider===$('provider').value && m.id===choice) ? choice : ''; if(!$('model').value) notice('Настроенная модель не установлена. Выберите модель явно.'); if(!modelList.length) notice('Ollama недоступна или модели не установлены — диагностический режим.'); }
   catch(e) { notice(e.message); }
 }
 function chooseModel() { if($('model').value) { stopTurn(); send({type:'provider',provider:$('provider').value,model:$('model').value}); } }
@@ -117,7 +143,7 @@ async function toggleMic() {
     mediaStream=await navigator.mediaDevices.getUserMedia({audio:true});
     if(version!==captureVersion) { await cleanupMic(); micPending=false; return; }
     const chunks=[];
-    const mime=['audio/webm;codecs=opus','audio/ogg;codecs=opus','audio/mp4'].find(t=>MediaRecorder.isTypeSupported(t));
+    const mime=['audio/webm;codecs=opus','audio/webm','audio/mp4'].find(t=>MediaRecorder.isTypeSupported(t));
     const recording=new MediaRecorder(mediaStream,mime ? {mimeType:mime} : {});
     recorder=recording;
     const recordStarted=performance.now();
@@ -131,7 +157,7 @@ async function toggleMic() {
       try {
         notice('Распознавание…');
         const r=await fetch('/api/stt',{method:'POST',headers:{'Content-Type':type},body:new Blob(chunks,{type}),signal:controller.signal});
-        const d=await r.json(); if(!r.ok) throw Error(d.detail || 'STT error');
+        const d=await r.json(); if(!r.ok) throw Error(`HTTP ${r.status}: ${d.detail || 'STT error'}`);
         if(version!==captureVersion) return;
         sttController=null; if(d.text) startTurn(d.text); else notice('Речь не обнаружена');
       } catch(e) { if(e.name!=='AbortError') notice(e.message); }
@@ -147,11 +173,11 @@ async function toggleMic() {
 $('form').onsubmit=e=>{e.preventDefault(); const text=$('input').value.trim(); if(text) {startTurn(text);$('input').value='';}};
 $('stop').onclick=()=>{stopTurn(); if(recorder?.state==='recording') recorder.stop();};
 $('stopAudio').onclick=stopTurn;
-$('mute').onclick=()=>{muted=!muted;clearAudio();$('mute').textContent=muted?'Unmute':'Mute';$('mute').setAttribute('aria-pressed',String(muted));};
+$('mute').onclick=()=>{muted=!muted;clearAudio();if(hudContext) (muted ? hudContext.suspend() : hudContext.resume()).catch(()=>{});$('mute').textContent=muted?'Звук: ВЫКЛ':'Звук: ВКЛ';$('mute').setAttribute('aria-pressed',String(muted));};
 $('tts').onchange=()=>{stopTurn();send({type:'tts',engine:$('tts').value});};
 $('mic').onclick=toggleMic;
 $('serverMic').onclick=()=>startTurn('', 'voice');
 $('camera').onclick=()=>startTurn('', 'vision_event');
 $('provider').onchange=()=>{renderModels();chooseModel();};$('model').onchange=chooseModel;$('refreshModels').onclick=loadModels;
-$('reset').onclick=()=>{if(confirm('Удалить память и восстановить директивы?')){stopTurn();send({type:'reset'});$('chat').replaceChildren();$('evaluation').textContent='Состояние сброшено';}};
+$('reset').onclick=()=>{if(confirm('Удалить память и восстановить директивы?')){stopTurn();send({type:'reset'});$('chat').replaceChildren();$('evaluation').textContent='Состояние сброшено';$('thought').textContent='';}};
 connect();
